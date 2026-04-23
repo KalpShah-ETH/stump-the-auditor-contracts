@@ -42,6 +42,7 @@ interface IVault {
     error InitialDepositTooSmall(uint256 amount, uint256 min);
     error UnsupportedToken(address token); // fee-on-transfer detected
     error InsufficientAssetLiquidity(address asset, uint256 needed, uint256 available);
+    error ShareAssetMismatch(address user, address expected, address actual);
 
     function deposit(address asset, uint256 amount, address receiver) external returns (uint256 sharesMinted);
     function requestWithdraw(uint256 shares, address asset) external returns (uint64 unlockBlock);

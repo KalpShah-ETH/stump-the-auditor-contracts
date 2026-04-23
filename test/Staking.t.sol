@@ -288,24 +288,18 @@ contract StakingTest is BaseTest {
         vm.prank(bob);
         staking.emergencyUnstake(0);
 
-        (,,, uint128 oldRewardRate,,, uint256 queuedPenalty) = staking.rewardData(address(stakingToken));
-        assertEq(queuedPenalty, 10 ether);
-        uint256 remaining = periodFinishBefore - block.timestamp;
-        uint256 leftover = (remaining * oldRewardRate) / 1e18;
-
-        vm.expectEmit(true, true, false, true);
-        emit PenaltyFlushed(address(stakingToken), 10 ether, periodFinishBefore);
-
+        (,,, uint128 oldRewardRate,, uint256 rewardPerTokenStored, uint256 queuedPenalty) =
+            staking.rewardData(address(stakingToken));
+        assertEq(queuedPenalty, 0);
+        assertGt(rewardPerTokenStored, 0);
         staking.flushPenalty();
 
-        (, uint64 newPeriodFinish,, uint128 newRewardRate,, uint256 rewardPerTokenStored, uint256 postQueuedPenalty) =
+        (, uint64 newPeriodFinish,, uint128 newRewardRate,,, uint256 postQueuedPenalty) =
             staking.rewardData(address(stakingToken));
 
         assertEq(postQueuedPenalty, 0);
         assertEq(newPeriodFinish, periodFinishBefore);
-        assertEq(newRewardRate, ((10 ether + leftover) * 1e18) / remaining);
-        assertGt(newRewardRate, oldRewardRate);
-        assertGt(rewardPerTokenStored, 0);
+        assertEq(newRewardRate, oldRewardRate);
 
         warp(periodFinishBefore - block.timestamp);
 
@@ -325,20 +319,15 @@ contract StakingTest is BaseTest {
         assertEq(stakingToken.balanceOf(bob), type(uint120).max - 10 ether + bobEarned);
     }
 
-    function test_flushPenalty_startsNewStreamWhenIdle() public {
+    function testEmergencyUnstakeDistributesPenaltyImmediatelyWhenEligible() public {
         _stake(alice, DEFAULT_STAKE, tier30);
         _stake(bob, DEFAULT_STAKE, tier30);
 
+        vm.expectEmit(true, true, false, true);
+        emit PenaltyFlushed(address(stakingToken), 10 ether, 0);
+
         vm.prank(bob);
         staking.emergencyUnstake(0);
-
-        uint64 expectedPeriodFinish = uint64(block.timestamp + REWARD_DURATION);
-        uint256 expectedRewardRate = (10 ether * 1e18) / REWARD_DURATION;
-
-        vm.expectEmit(true, true, false, true);
-        emit PenaltyFlushed(address(stakingToken), 10 ether, expectedPeriodFinish);
-
-        staking.flushPenalty();
 
         (
             ,
@@ -349,15 +338,28 @@ contract StakingTest is BaseTest {
             uint256 queuedPenalty
         ) = staking.rewardData(address(stakingToken));
 
-        assertEq(periodFinish, expectedPeriodFinish);
-        assertEq(lastUpdateTime, block.timestamp);
-        assertEq(rewardRate, expectedRewardRate);
-        assertEq(rewardPerTokenStored, 0);
+        assertEq(periodFinish, 0);
+        assertEq(lastUpdateTime, 0);
+        assertEq(rewardRate, 0);
+        assertGt(rewardPerTokenStored, 0);
         assertEq(queuedPenalty, 0);
 
-        warp(REWARD_DURATION);
-
         assertApproxEqAbs(staking.earned(alice, address(stakingToken)), 10 ether, DUST_TOLERANCE);
+        assertEq(staking.earned(bob, address(stakingToken)), 0);
+    }
+
+    function testEmergencyPenaltyCannotBeCapturedByLateStaker() public {
+        _stake(alice, DEFAULT_STAKE, tier30);
+        _stake(bob, DEFAULT_STAKE, tier30);
+
+        vm.prank(alice);
+        staking.emergencyUnstake(0);
+
+        _stake(charlie, DEFAULT_STAKE * 9, tier30);
+        staking.flushPenalty();
+
+        assertApproxEqAbs(staking.earned(bob, address(stakingToken)), 10 ether, DUST_TOLERANCE);
+        assertEq(staking.earned(charlie, address(stakingToken)), 0);
     }
 
     function test_flushPenalty_revertsBelowMin() public {
@@ -903,6 +905,25 @@ contract StakingTest is BaseTest {
         staking.notifyRewardAmount(address(stakingToken), 0);
     }
 
+    function test_zeroSupplyRewardStreamPausesUntilStakeExists() public {
+        _notify(address(bonusToken), 30 ether);
+        (, uint64 periodFinishBefore,, uint128 rewardRateBefore,,,) = staking.rewardData(address(bonusToken));
+
+        vm.warp(block.timestamp + 10 days);
+
+        _stake(alice, DEFAULT_STAKE, tier30);
+
+        assertEq(staking.earned(alice, address(bonusToken)), 0);
+
+        (, uint64 periodFinishAfter,, uint128 rewardRateAfter,,,) = staking.rewardData(address(bonusToken));
+        assertEq(periodFinishAfter, periodFinishBefore + 10 days);
+        assertEq(rewardRateAfter, rewardRateBefore);
+
+        vm.warp(block.timestamp + 1 days);
+
+        assertApproxEqAbs(staking.earned(alice, address(bonusToken)), 1 ether, DUST_TOLERANCE);
+    }
+
     function testNotifyRewardAmountRejectsFeeOnTransferRewardToken() public {
         FeeOnTransferERC20 feeReward = _deployFeeToken("FeeReward", "FRWD", 18, 100);
         Staking fresh = _deployFreshStaking(IERC20(address(stakingToken)), 500);
@@ -1136,23 +1157,41 @@ contract StakingTest is BaseTest {
 
     function testFlushPenaltyChecksPrimaryRewardBacking() public {
         _stake(alice, DEFAULT_STAKE, tier30);
-        _stake(bob, DEFAULT_STAKE, tier30);
 
-        vm.prank(bob);
+        vm.prank(alice);
         staking.emergencyUnstake(0);
 
         vm.prank(owner);
         stakingToken.burn(address(staking), 1 ether);
 
-        uint256 rewardRate = (10 ether * 1e18) / REWARD_DURATION;
-        uint256 requiredBalance = 100 ether + ((uint256(REWARD_DURATION) * rewardRate) / 1e18);
-
         vm.expectRevert(
             abi.encodeWithSelector(
-                Staking.InsufficientRewardBalance.selector, address(stakingToken), requiredBalance, uint256(109 ether)
+                Staking.InsufficientRewardBalance.selector, address(stakingToken), 10 ether - 1, 9 ether
             )
         );
         staking.flushPenalty();
+    }
+
+    function testFlushPenaltyOverflowDoesNotExtendActiveStream() public {
+        _stake(alice, 4_000 ether, tier30);
+        _notify(address(stakingToken), 1 ether);
+
+        (, uint64 periodFinishBefore,,,,,) = staking.rewardData(address(stakingToken));
+
+        vm.warp(periodFinishBefore - 1);
+
+        vm.prank(alice);
+        staking.emergencyUnstake(0);
+
+        (,,,,,, uint256 queuedPenaltyBefore) = staking.rewardData(address(stakingToken));
+        assertGt(queuedPenaltyBefore, 340 ether);
+
+        vm.expectRevert(Staking.Overflow.selector);
+        staking.flushPenalty();
+
+        (, uint64 periodFinishAfter,,,,, uint256 queuedPenaltyAfter) = staking.rewardData(address(stakingToken));
+        assertEq(periodFinishAfter, periodFinishBefore);
+        assertEq(queuedPenaltyAfter, queuedPenaltyBefore);
     }
 
     function testConstructorRejectsInvalidPrimaryRewardToken() public {

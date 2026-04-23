@@ -29,9 +29,10 @@ import {IStaking} from "./interfaces/IStaking.sol";
 ///     - `_userActiveStakeCount[user]` and `_userBoostedAmount[user]` are storage-tracked (O(1) reads), not derived by
 ///       scanning `_userStakes[user][]` on every call. Keeping them consistent is the caller's responsibility on every
 ///       mutation path.
-///     - Early-unstake penalties route into `primaryRewardToken`'s `queuedPenalty`. `flushPenalty()` moves queued penalty
-///       into the reward stream WITHOUT extending `periodFinish` — if a stream is active, penalty is folded into the
-///       remaining window's rate. This prevents schedule-extension griefing.
+///     - Early-unstake penalties are credited immediately to the existing eligible boosted supply, excluding the
+///       penalized user's remaining stakes. If no eligible cohort exists, the penalty waits in `queuedPenalty`.
+///       `flushPenalty()` moves queued penalty into the reward stream WITHOUT extending `periodFinish` — if a stream is
+///       active, penalty is folded into the remaining window's rate. This prevents schedule-extension griefing.
 ///     - `compound()` zeros the user's primary-token reward balance BEFORE creating the new stake. No transfer — the tokens
 ///       are already in the contract.
 ///
@@ -163,7 +164,7 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         emit Unstaked(msg.sender, stakeId, amount);
     }
 
-    /// @notice Exits a still-locked stake early and routes the penalty into the queued primary reward pool.
+    /// @notice Exits a still-locked stake early and routes the penalty to eligible existing stakers.
     /// @param stakeId The caller's stake index to close early.
     function emergencyUnstake(uint256 stakeId) external nonReentrant {
         Stake storage userStake = _getUserStakeStorage(msg.sender, stakeId);
@@ -183,8 +184,7 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         _userActiveStakeCount[msg.sender] -= 1;
         _userBoostedAmount[msg.sender] -= boostedAmount;
 
-        rewardData[primaryRewardToken].queuedPenalty += penalty;
-        emit PenaltyQueued(primaryRewardToken, penalty);
+        _distributeOrQueuePenalty(msg.sender, penalty);
 
         stakingToken.safeTransfer(msg.sender, returnAmount);
 
@@ -228,6 +228,7 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
 
         uint256 amount = rewards[msg.sender][primaryRewardToken];
         if (amount == 0) revert NothingToClaim();
+        if (amount < MIN_STAKE_AMOUNT) revert AmountTooSmall(amount, MIN_STAKE_AMOUNT);
 
         rewards[msg.sender][primaryRewardToken] = 0;
 
@@ -255,18 +256,21 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         if (amount == 0) return;
         if (amount < MIN_FLUSH_PENALTY_AMOUNT) revert PenaltyAmountTooLow(amount, MIN_FLUSH_PENALTY_AMOUNT);
 
-        reward.queuedPenalty = 0;
-
         uint64 currentTime = _currentTime();
         uint64 newPeriodFinish;
         uint256 newRewardRate;
         if (block.timestamp >= reward.periodFinish) {
+            reward.queuedPenalty = 0;
             newRewardRate = Math.mulDiv(amount, PRECISION, reward.rewardsDuration);
             newPeriodFinish = _currentTimePlus(reward.rewardsDuration);
         } else {
             uint256 remaining = reward.periodFinish - block.timestamp;
             uint256 leftoverRewards = Math.mulDiv(remaining, reward.rewardRate, PRECISION);
-            newRewardRate = Math.mulDiv(amount + leftoverRewards, PRECISION, remaining);
+            uint256 rewardsToStream = amount + leftoverRewards;
+            newRewardRate = Math.mulDiv(rewardsToStream, PRECISION, remaining);
+            if (newRewardRate > type(uint128).max) revert Overflow();
+
+            reward.queuedPenalty = 0;
             newPeriodFinish = reward.periodFinish;
         }
 
@@ -391,6 +395,9 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         if (multiplierBps < MIN_BOOST_BPS || multiplierBps > MAX_BOOST_BPS) {
             revert BoostOutOfRange(multiplierBps, MIN_BOOST_BPS, MAX_BOOST_BPS);
         }
+        if (duration == 0 && multiplierBps > MIN_BOOST_BPS) {
+            revert RewardDurationOutOfRange(duration, 1, type(uint64).max);
+        }
 
         tierId = nextLockTierId;
         nextLockTierId = tierId + 1;
@@ -469,7 +476,19 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
     function _updateRewardGlobal(address token) internal {
         RewardData storage reward = rewardData[token];
         reward.rewardPerTokenStored = rewardPerTokenFor(token);
-        reward.lastUpdateTime = _lastTimeRewardApplicable(reward);
+        if (totalBoostedSupply == 0 && reward.lastUpdateTime < reward.periodFinish) {
+            uint64 currentTime = _currentTime();
+            if (currentTime > reward.lastUpdateTime) {
+                uint256 pausedTime = currentTime - reward.lastUpdateTime;
+                uint256 extendedPeriodFinish = uint256(reward.periodFinish) + pausedTime;
+                if (extendedPeriodFinish > type(uint64).max) revert Overflow();
+
+                reward.periodFinish = uint64(extendedPeriodFinish);
+                reward.lastUpdateTime = currentTime;
+            }
+        } else {
+            reward.lastUpdateTime = _lastTimeRewardApplicable(reward);
+        }
     }
 
     function _updateRewardUser(address user, address token) internal {
@@ -528,6 +547,24 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         totalBoostedSupply += boostedAmount;
         _userActiveStakeCount[user] += 1;
         _userBoostedAmount[user] += boostedAmount;
+    }
+
+    function _distributeOrQueuePenalty(address penalizedUser, uint128 penalty) internal {
+        RewardData storage reward = rewardData[primaryRewardToken];
+        uint256 penalizedRemainingBoost = _userBoostedAmount[penalizedUser];
+        uint256 eligibleBoostedSupply =
+            totalBoostedSupply > penalizedRemainingBoost ? totalBoostedSupply - penalizedRemainingBoost : 0;
+
+        if (eligibleBoostedSupply == 0) {
+            reward.queuedPenalty += penalty;
+            emit PenaltyQueued(primaryRewardToken, penalty);
+            return;
+        }
+
+        reward.rewardPerTokenStored += Math.mulDiv(penalty, PRECISION, eligibleBoostedSupply);
+        userRewardPerTokenPaid[penalizedUser][primaryRewardToken] = reward.rewardPerTokenStored;
+
+        emit PenaltyFlushed(primaryRewardToken, penalty, reward.periodFinish);
     }
 
     function _claimReward(address user, address rewardToken) internal returns (uint256 claimed) {

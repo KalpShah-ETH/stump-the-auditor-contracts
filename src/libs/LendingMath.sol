@@ -28,28 +28,29 @@ library LendingMath {
         changed = true;
         updated.lastUpdateTimestamp = timestamp.toUint64();
 
-        if (updated.totalScaledSupply == 0) {
-            return (updated, 0, true);
-        }
-
         uint256 totalSupplyActual =
             scaledToUnderlying(updated.totalScaledSupply, updated.supplyIndex, Math.Rounding.Floor);
-        if (totalSupplyActual == 0) {
+        uint256 totalBorrowActual =
+            scaledToUnderlying(updated.totalScaledBorrow, updated.borrowIndex, Math.Rounding.Floor);
+
+        if (totalSupplyActual == 0 && totalBorrowActual == 0) {
             return (updated, 0, true);
         }
 
-        uint256 totalBorrowActual =
-            scaledToUnderlying(updated.totalScaledBorrow, updated.borrowIndex, Math.Rounding.Floor);
         uint256 oldBorrowIndex = updated.borrowIndex;
         uint256 newBorrowIndex;
 
         {
-            uint256 utilizationRay = totalBorrowActual == 0 ? 0 : Math.mulDiv(totalBorrowActual, RAY, totalSupplyActual);
+            uint256 utilizationRay = totalSupplyActual == 0
+                ? RAY
+                : totalBorrowActual == 0 ? 0 : Math.mulDiv(totalBorrowActual, RAY, totalSupplyActual);
             (uint256 borrowRatePerYear, uint256 supplyRatePerYear) = ratesRay(updated, utilizationRay);
 
             newBorrowIndex = Math.mulDiv(oldBorrowIndex, RAY + ((borrowRatePerYear / SECONDS_PER_YEAR) * dt), RAY);
-            updated.supplyIndex =
-                Math.mulDiv(updated.supplyIndex, RAY + ((supplyRatePerYear / SECONDS_PER_YEAR) * dt), RAY);
+            if (totalSupplyActual != 0) {
+                updated.supplyIndex =
+                    Math.mulDiv(updated.supplyIndex, RAY + ((supplyRatePerYear / SECONDS_PER_YEAR) * dt), RAY);
+            }
         }
 
         if (totalBorrowActual != 0 && updated.reserveFactorBps != 0 && newBorrowIndex > oldBorrowIndex) {
@@ -114,8 +115,16 @@ library LendingMath {
         pure
         returns (uint256 amount)
     {
+        return amountFromValueWad(valueWad, decimals, price, Math.Rounding.Floor);
+    }
+
+    function amountFromValueWad(uint256 valueWad, uint8 decimals, uint256 price, Math.Rounding rounding)
+        internal
+        pure
+        returns (uint256 amount)
+    {
         if (valueWad == 0) return 0;
-        amount = fromWad(Math.mulDiv(valueWad, pow10(ORACLE_DECIMALS), price), decimals);
+        amount = fromWad(Math.mulDiv(valueWad, pow10(ORACLE_DECIMALS), price, rounding), decimals, rounding);
     }
 
     function scaledToUnderlying(uint256 scaledAmount, uint256 index, Math.Rounding rounding)
@@ -134,9 +143,13 @@ library LendingMath {
     }
 
     function fromWad(uint256 wadAmount, uint8 decimals) internal pure returns (uint256 amount) {
+        return fromWad(wadAmount, decimals, Math.Rounding.Floor);
+    }
+
+    function fromWad(uint256 wadAmount, uint8 decimals, Math.Rounding rounding) internal pure returns (uint256 amount) {
         if (decimals == 18) return wadAmount;
-        if (decimals < 18) return Math.mulDiv(wadAmount, 1, pow10(uint8(18 - decimals)));
-        return Math.mulDiv(wadAmount, pow10(uint8(decimals - 18)), 1);
+        if (decimals < 18) return Math.mulDiv(wadAmount, 1, pow10(uint8(18 - decimals)), rounding);
+        return Math.mulDiv(wadAmount, pow10(uint8(decimals - 18)), 1, rounding);
     }
 
     function pow10(uint8 exponent) internal pure returns (uint256 value) {

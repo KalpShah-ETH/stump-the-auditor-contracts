@@ -253,7 +253,7 @@ contract VaultTest is BaseTest {
         assertEq(fresh.feeRecipient(), feeRecipient);
     }
 
-    function test_reportYield_chargesPerfFeeOnPendingAndActive() public {
+    function test_reportYield_chargesPerfFeeOnlyOnActiveShares() public {
         Vault fresh = _deployDefaultVault(3_000, 0, DEFAULT_TIMELOCK);
 
         _depositDai(fresh, alice, 1_000 ether);
@@ -262,8 +262,13 @@ contract VaultTest is BaseTest {
         uint256 aliceShares = fresh.userShares(alice);
         vm.prank(alice);
         fresh.requestWithdraw(aliceShares, address(dai));
+        IVault.WithdrawRequest memory requestBefore = fresh.getPendingWithdraw(alice);
 
         _reportYield(fresh, dai, 200 ether);
+        IVault.WithdrawRequest memory requestAfter = fresh.getPendingWithdraw(alice);
+
+        assertEq(requestAfter.wadOwed, requestBefore.wadOwed);
+        assertEq(requestAfter.reservedAmount, requestBefore.reservedAmount);
 
         vm.prank(charlie);
         fresh.accrueFees();
@@ -278,15 +283,14 @@ contract VaultTest is BaseTest {
         uint256 feeRecipientAssets = fresh.convertToAssets(fresh.userShares(feeRecipient));
 
         assertEq(dai.balanceOf(alice) - aliceBalanceBefore, aliceOut);
-        assertGt(aliceOut, 1_070 ether);
-        assertLt(aliceOut, 1_071 ether);
-        assertGt(bobAssets, 1_070 ether);
-        assertLt(bobAssets, 1_071 ether);
-        assertGt(feeRecipientAssets, 50 ether);
-        assertApproxEqAbs(feeRecipientAssets, 60 ether, 3 ether);
+        assertEq(aliceOut, 1_000 ether);
+        assertGt(bobAssets, 1_130 ether);
+        assertLt(bobAssets, 1_145 ether);
+        assertGt(feeRecipientAssets, 55 ether);
+        assertLt(feeRecipientAssets, 60 ether);
     }
 
-    function test_reportYield_skewedPendingStateDoesNotOverchargePerfFee() public {
+    function test_reportYield_skewedPendingStateDoesNotIteratePendingYield() public {
         Vault fresh = _deployDefaultVault(3_000, 0, DEFAULT_TIMELOCK);
 
         _depositDai(fresh, alice, 200 ether);
@@ -295,8 +299,13 @@ contract VaultTest is BaseTest {
         uint256 aliceShares = fresh.userShares(alice);
         vm.prank(alice);
         fresh.requestWithdraw(aliceShares, address(dai));
+        IVault.WithdrawRequest memory requestBefore = fresh.getPendingWithdraw(alice);
 
         _reportYield(fresh, dai, 100 ether);
+        IVault.WithdrawRequest memory requestAfter = fresh.getPendingWithdraw(alice);
+
+        assertEq(requestAfter.wadOwed, requestBefore.wadOwed);
+        assertEq(requestAfter.reservedAmount, requestBefore.reservedAmount);
 
         vm.prank(charlie);
         fresh.accrueFees();
@@ -304,18 +313,17 @@ contract VaultTest is BaseTest {
         uint256 feeRecipientAssets = fresh.convertToAssets(fresh.userShares(feeRecipient));
         uint256 bobAssets = fresh.convertToAssets(fresh.userShares(bob));
 
-        assertGt(feeRecipientAssets, 29 ether);
-        assertLt(feeRecipientAssets, 31 ether);
-        assertGt(bobAssets, 1.3 ether);
-        assertLt(bobAssets, 1.5 ether);
+        assertGt(feeRecipientAssets, 20 ether);
+        assertLt(feeRecipientAssets, 25 ether);
+        assertGt(bobAssets, 75 ether);
+        assertLt(bobAssets, 80 ether);
 
         advanceBlocks(DEFAULT_TIMELOCK);
 
         vm.prank(alice);
         uint256 aliceOut = fresh.claimWithdraw();
 
-        assertGt(aliceOut, 269 ether);
-        assertLt(aliceOut, 270 ether);
+        assertEq(aliceOut, 200 ether);
     }
 
     function testReportYieldRevertsWhenAllSharesArePending() public {
@@ -399,7 +407,8 @@ contract VaultTest is BaseTest {
         vm.prank(charlie);
         fresh.accrueFees();
 
-        assertEq(fresh.highWaterMarkPPS(), expectedPps);
+        assertEq(fresh.highWaterMarkPPS(), _currentPps(depositAmount + profit, fresh.totalShares()));
+        assertLt(fresh.highWaterMarkPPS(), expectedPps);
         assertGt(fresh.userShares(feeRecipient), 0);
     }
 
@@ -427,6 +436,11 @@ contract VaultTest is BaseTest {
         uint256 managedBefore = fresh.totalAssets();
         uint256 supplyBefore = fresh.totalShares();
         uint256 requiredProfit = _profitNeededToReachPps(hwmBefore, managedBefore, supplyBefore);
+        if (requiredProfit <= 1) {
+            assertEq(fresh.userShares(feeRecipient), feeSharesBefore);
+            assertEq(fresh.highWaterMarkPPS(), hwmBefore);
+            return;
+        }
         uint256 smallProfit = requiredProfit > 1 ? requiredProfit - 1 : 0;
         assertGt(smallProfit, 0);
 
@@ -527,7 +541,7 @@ contract VaultTest is BaseTest {
         fresh.deposit(address(highDecimals), 50, alice);
     }
 
-    function testRequestWithdrawRevertsWhenClaimRoundsDownToZeroNativeUnits() public {
+    function testRequestWithdrawRejectsDifferentShareAssetBeforeRounding() public {
         Vault fresh = _deployFreshVault(0, 0, DEFAULT_TIMELOCK);
         MockERC20 highDecimals = deployMockToken("HDEC", 20);
 
@@ -545,9 +559,21 @@ contract VaultTest is BaseTest {
         fresh.deposit(address(usdc), 1e6, bob);
 
         uint256 aliceShares = fresh.userShares(alice);
-        vm.expectRevert(IVault.ZeroAmount.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IVault.ShareAssetMismatch.selector, alice, address(highDecimals), address(usdc))
+        );
         vm.prank(alice);
         fresh.requestWithdraw(aliceShares, address(usdc));
+    }
+
+    function testDepositRejectsDifferentAssetForExistingShares() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        _depositUsdc(fresh, alice, 100e6);
+
+        vm.expectRevert(abi.encodeWithSelector(IVault.ShareAssetMismatch.selector, alice, address(usdc), address(dai)));
+        vm.prank(alice);
+        fresh.deposit(address(dai), 1 ether, alice);
     }
 
     function testFeeOnTransferDepositRevertsUnsupportedToken() public {
@@ -1011,16 +1037,39 @@ contract VaultTest is BaseTest {
         vault.setTimelockBlocks(50_401);
     }
 
-    function testRequestWithdrawRevertsWhenAssetLiquidityMissing() public {
+    function testRequestWithdrawRejectsDifferentSettlementAsset() public {
         _depositUsdc(vault, alice, 100e6);
 
         uint256 fullShares = vault.userShares(alice);
-        vm.expectRevert(abi.encodeWithSelector(IVault.InsufficientAssetLiquidity.selector, address(dai), 100 ether, 0));
+        vm.expectRevert(abi.encodeWithSelector(IVault.ShareAssetMismatch.selector, alice, address(usdc), address(dai)));
         vm.prank(alice);
         vault.requestWithdraw(fullShares, address(dai));
     }
 
     function testRequestWithdrawReservesPerAssetLiquidity() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        _depositUsdc(fresh, alice, 100e6);
+        _depositUsdc(fresh, bob, 100e6);
+        _reportYield(fresh, dai, 100 ether);
+
+        uint256 aliceShares = fresh.userShares(alice);
+        vm.prank(alice);
+        fresh.requestWithdraw(aliceShares, address(usdc));
+
+        assertGt(fresh.reservedForWithdraw(address(usdc)), 100e6);
+
+        uint256 bobShares = fresh.userShares(bob);
+        uint256 needed = _fromWad(fresh.previewWithdraw(bobShares), 6);
+        uint256 available = usdc.balanceOf(address(fresh)) - fresh.reservedForWithdraw(address(usdc));
+        vm.expectRevert(
+            abi.encodeWithSelector(IVault.InsufficientAssetLiquidity.selector, address(usdc), needed, available)
+        );
+        vm.prank(bob);
+        fresh.requestWithdraw(bobShares, address(usdc));
+    }
+
+    function testReportYieldIgnoresPendingRequestAssetLiquidity() public {
         Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
 
         _depositUsdc(fresh, alice, 100e6);
@@ -1030,12 +1079,15 @@ contract VaultTest is BaseTest {
         vm.prank(alice);
         fresh.requestWithdraw(aliceShares, address(usdc));
 
-        assertEq(fresh.reservedForWithdraw(address(usdc)), 100e6);
+        IVault.WithdrawRequest memory requestBefore = fresh.getPendingWithdraw(alice);
+        assertEq(fresh.reservedForWithdraw(address(usdc)), usdc.balanceOf(address(fresh)));
 
-        uint256 bobShares = fresh.userShares(bob);
-        vm.expectRevert(abi.encodeWithSelector(IVault.InsufficientAssetLiquidity.selector, address(usdc), 100e6, 0));
-        vm.prank(bob);
-        fresh.requestWithdraw(bobShares, address(usdc));
+        _reportYield(fresh, dai, 10 ether);
+
+        IVault.WithdrawRequest memory requestAfter = fresh.getPendingWithdraw(alice);
+        assertEq(requestAfter.wadOwed, requestBefore.wadOwed);
+        assertEq(requestAfter.reservedAmount, requestBefore.reservedAmount);
+        assertEq(fresh.reservedForWithdraw(address(usdc)), requestBefore.reservedAmount);
     }
 
     function testClaimWithdrawRevertsWhenLiquidityWasLost() public {

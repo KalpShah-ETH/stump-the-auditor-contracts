@@ -64,6 +64,8 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     uint256 public constant MAX_RESERVE_FACTOR_BPS = 5_000;
     uint256 public constant MAX_ORACLE_STALENESS = 1 hours;
     uint8 public constant ORACLE_DECIMALS = 8;
+    uint8 public constant MIN_RESERVE_DECIMALS = 6;
+    uint8 public constant MAX_RESERVE_DECIMALS = 18;
 
     mapping(address => Reserve) public reserves;
     address[] public reserveList;
@@ -83,7 +85,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     /// @param oracle_ The oracle used for USD pricing.
     /// @param closeFactorBps_ The initial close factor in basis points.
     constructor(IPriceOracle oracle_, uint256 closeFactorBps_) Ownable(msg.sender) {
-        if (address(oracle_) == address(0)) revert ZeroAddress();
+        _validateOracle(oracle_);
         if (closeFactorBps_ > MAX_CLOSE_FACTOR_BPS) {
             revert CloseFactorTooHigh(closeFactorBps_, MAX_CLOSE_FACTOR_BPS);
         }
@@ -116,7 +118,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         userScaledSupply[onBehalfOf][asset] += scaledAmount;
         reserve.totalScaledSupply = (uint256(reserve.totalScaledSupply) + scaledAmount).toUint128();
 
-        if (reserve.useAsCollateral && !_hasCollateral[onBehalfOf][asset]) {
+        if (onBehalfOf == msg.sender && reserve.useAsCollateral && !_hasCollateral[onBehalfOf][asset]) {
             _hasCollateral[onBehalfOf][asset] = true;
             userCollateralAssets[onBehalfOf].push(asset);
         }
@@ -157,6 +159,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         if (_userHasDebt(msg.sender)) {
             (,,, uint256 healthFactor) = _getUserAccountData(msg.sender);
             if (healthFactor < MIN_HEALTH_FACTOR) revert HealthFactorBelowThreshold(healthFactor);
+            _requireWithinBorrowCapacity(msg.sender);
         }
 
         uint256 liquidity = _availableLiquidity(asset, reserve.accruedReserves);
@@ -195,6 +198,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
 
         (,,, uint256 healthFactor) = _getUserAccountData(msg.sender);
         if (healthFactor < MIN_HEALTH_FACTOR) revert HealthFactorBelowThreshold(healthFactor);
+        _requireWithinBorrowCapacity(msg.sender);
 
         uint256 liquidity = _availableLiquidity(asset, reserve.accruedReserves);
         if (liquidity < amount) revert InsufficientLiquidity(asset, amount, liquidity);
@@ -261,7 +265,6 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         if (borrower == address(0)) revert ZeroAddress();
         if (borrower == msg.sender) revert SelfLiquidation();
         if (collateralAsset == debtAsset) revert DebtAssetIsCollateralAsset();
-
         _accrueInterest(collateralAsset);
         _accrueInterest(debtAsset);
 
@@ -400,6 +403,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         _validateReserveParams(collateralFactorBps_, liquidationThresholdBps, liquidationBonusBps, reserveFactorBps);
 
         uint8 decimals_ = IERC20Metadata(asset).decimals();
+        if (decimals_ < MIN_RESERVE_DECIMALS || decimals_ > MAX_RESERVE_DECIMALS) revert UnsupportedToken(asset);
         reserves[asset] = Reserve({
             listed: true,
             borrowEnabled: borrowEnabled,
@@ -497,7 +501,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Updates the oracle used for USD pricing.
     /// @param newOracle The new oracle contract.
     function setOracle(IPriceOracle newOracle) external onlyOwner {
-        if (address(newOracle) == address(0)) revert ZeroAddress();
+        _validateOracle(newOracle);
 
         oracle = newOracle;
         emit OracleUpdated(address(newOracle));
@@ -661,7 +665,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 debtValueWad
     ) internal returns (uint256 collateralSeized, uint256 liquidatorBonus) {
         uint256 seizeValueWad = Math.mulDiv(debtValueWad, BPS + collateralReserve.liquidationBonusBps, BPS);
-        uint256 targetCollateralAmount = _getAmountFromValueWad(collateralAsset, seizeValueWad);
+        uint256 targetCollateralAmount = _getAmountFromValueWad(collateralAsset, seizeValueWad, Math.Rounding.Ceil);
 
         uint256 borrowerScaledCollateral = userScaledSupply[borrower][collateralAsset];
         uint256 borrowerCollateral = LendingMath.scaledToUnderlying(
@@ -693,7 +697,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
             userCollateralAssets[liquidator].push(collateralAsset);
         }
 
-        uint256 baseCollateralAmount = _getAmountFromValueWad(collateralAsset, debtValueWad);
+        uint256 baseCollateralAmount = _getAmountFromValueWad(collateralAsset, debtValueWad, Math.Rounding.Floor);
         liquidatorBonus = collateralSeized > baseCollateralAmount ? collateralSeized - baseCollateralAmount : 0;
     }
 
@@ -711,6 +715,14 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function _getAmountFromValueWad(address asset, uint256 valueWad) internal view returns (uint256 amount) {
+        return _getAmountFromValueWad(asset, valueWad, Math.Rounding.Floor);
+    }
+
+    function _getAmountFromValueWad(address asset, uint256 valueWad, Math.Rounding rounding)
+        internal
+        view
+        returns (uint256 amount)
+    {
         if (valueWad == 0) return 0;
 
         Reserve memory reserve = _getStoredReserve(asset);
@@ -720,7 +732,7 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
             revert PriceStale(asset, updatedAt, block.timestamp);
         }
 
-        amount = LendingMath.amountFromValueWad(valueWad, reserve.decimals, price);
+        amount = LendingMath.amountFromValueWad(valueWad, reserve.decimals, price, rounding);
     }
 
     function _availableLiquidity(address asset, uint256 accruedReserves) internal view returns (uint256 liquidity) {
@@ -743,9 +755,45 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
         if (liquidationBonusBps > MAX_LIQ_BONUS_BPS) {
             revert LiquidationBonusTooHigh(liquidationBonusBps, MAX_LIQ_BONUS_BPS);
         }
+        if (uint256(liquidationThresholdBps) * (BPS + liquidationBonusBps) >= BPS * BPS) {
+            revert LiquidationBonusTooHigh(liquidationBonusBps, MAX_LIQ_BONUS_BPS);
+        }
         if (reserveFactorBps > MAX_RESERVE_FACTOR_BPS) {
             revert ReserveFactorTooHigh(reserveFactorBps, MAX_RESERVE_FACTOR_BPS);
         }
+    }
+
+    function _requireWithinBorrowCapacity(address user) internal view {
+        (, uint256 totalDebtValueWad, uint256 availableBorrowsWad,) = _getUserAccountData(user);
+        if (totalDebtValueWad != 0 && availableBorrowsWad == 0) {
+            uint256 collateralCapacityWad;
+            address[] storage collateralAssets = userCollateralAssets[user];
+            for (uint256 i; i < collateralAssets.length; ++i) {
+                address asset = collateralAssets[i];
+                uint256 scaledBalance = userScaledSupply[user][asset];
+                if (scaledBalance == 0) continue;
+
+                Reserve memory reserve = _getUpdatedReserve(asset);
+                if (!reserve.useAsCollateral) continue;
+
+                uint256 supplyBalance =
+                    LendingMath.scaledToUnderlying(scaledBalance, reserve.supplyIndex, Math.Rounding.Floor);
+                if (supplyBalance == 0) continue;
+
+                collateralCapacityWad += Math.mulDiv(
+                    _getAssetValueWad(asset, supplyBalance), reserve.collateralFactorBps, BPS
+                );
+            }
+
+            if (totalDebtValueWad > collateralCapacityWad) {
+                revert HealthFactorBelowThreshold(Math.mulDiv(collateralCapacityWad, WAD, totalDebtValueWad));
+            }
+        }
+    }
+
+    function _validateOracle(IPriceOracle oracle_) internal view {
+        if (address(oracle_) == address(0)) revert ZeroAddress();
+        if (oracle_.decimals() != ORACLE_DECIMALS) revert UnsupportedToken(address(oracle_));
     }
 
     function _userHasDebt(address user) internal view returns (bool) {

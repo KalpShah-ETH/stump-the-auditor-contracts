@@ -26,12 +26,14 @@ import {IVault} from "./interfaces/IVault.sol";
 ///     - `totalPendingWithdrawWad` is the frozen WAD claim on capital held for timelocked withdrawals.
 ///     - `_activeManagedWad() = totalManagedWad - totalPendingWithdrawWad` is the base used for per-share price (PPS).
 ///       This carve-out prevents `requestWithdraw` from ever lifting PPS and masquerading as yield.
+///     - `shareAssetOf[user]` binds user shares to the asset first deposited for that share account. Users may not
+///       deposit one whitelisted asset and redeem a different whitelisted asset from the shared pool.
 ///
 ///   Fee schedule — `_accrueFees()` runs on every state-mutating entry point:
 ///     1. Time passes -> management fee minted to fee recipient (dilution-based, uses `_effectiveTotalShares`).
 ///     2. Current PPS recomputed (only `reportYield` actually lifts it; deposit/withdraw are construction-preserving).
 ///     3. If PPS > high-water-mark PPS, performance fee minted on the lift × active shares.
-///     4. Pending-side performance fee is charged proportionally at `reportYield` time, not here.
+///     4. Pending withdrawals are fixed claims and do not participate in future yield or performance fees.
 ///
 ///   Pause matrix: deposit + requestWithdraw blocked; claimWithdraw + cancelWithdraw always available; reportYield is
 ///   owner-only and also blocked while paused.
@@ -58,6 +60,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     mapping(address => AssetConfig) public assetConfig;
     address[] public assetList;
     mapping(address => uint256) public userShares;
+    mapping(address => address) public shareAssetOf;
     uint256 public totalShares;
     uint256 public totalManagedWad;
     mapping(address => WithdrawRequest) public pendingWithdraw;
@@ -118,6 +121,8 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         if (receiver == address(0)) revert ZeroAddress();
 
         AssetConfig storage config = _requireWhitelistedAsset(asset);
+        _setOrCheckShareAsset(receiver, asset);
+
         bool initializingSupply = totalShares == 0;
         if (initializingSupply && amount < MIN_INITIAL_DEPOSIT) {
             revert InitialDepositTooSmall(amount, MIN_INITIAL_DEPOSIT);
@@ -132,6 +137,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         uint256 amountWad = _toWad(received, config.decimals);
         if (amountWad == 0) revert ZeroAmount();
+
         uint256 activeManagedWad = _activeManagedWad();
         sharesMinted = _computeShares(amountWad, totalShares, activeManagedWad);
 
@@ -149,9 +155,8 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
     /// @notice Burns shares into a timelocked withdrawal claim denominated in a chosen asset.
     /// @dev The request freezes the caller's share count and initial WAD claim. While active capital still exists,
-    ///      future `reportYield` calls split realized profit between active shares and pending requests pro rata to
-    ///      their pre-report exposure; the pending side accrues its net-of-performance-fee share directly into
-    ///      `wadOwed` and `reservedAmount`.
+    ///      future `reportYield` calls accrue only to active shares; the pending claim stays fixed in the requested
+    ///      settlement asset so yield reporting never needs to iterate or re-reserve every pending withdrawal.
     /// @param shares The number of shares to burn into the request.
     /// @param asset The whitelisted asset to be received on claim.
     /// @return unlockBlock The first block at which the withdrawal may be claimed.
@@ -165,6 +170,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         if (shares == 0) revert ZeroAmount();
         AssetConfig storage config = _requireWhitelistedAsset(asset);
+        _requireShareAsset(msg.sender, asset);
 
         WithdrawRequest storage existingRequest = pendingWithdraw[msg.sender];
         if (existingRequest.shares != 0) revert PendingWithdrawExists(msg.sender);
@@ -224,6 +230,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         _removePendingUser(msg.sender);
         delete pendingWithdraw[msg.sender];
+        if (userShares[msg.sender] == 0) delete shareAssetOf[msg.sender];
 
         IERC20(request.asset).safeTransfer(msg.sender, amountOut);
 
@@ -396,10 +403,8 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice Pulls whitelisted strategy profits into the vault and adds them to managed assets.
-    /// @dev Pull-based accounting keeps managed assets aligned with live balances. Realized profit is split between the
-    ///      active pool and pending withdrawal liabilities in proportion to their pre-report exposure. The active share
-    ///      continues through the high-water-mark path, while the pending-side performance fee is crystallized
-    ///      immediately into fee-recipient shares so active PPS stays tied to the active-yield allocation only.
+    /// @dev Pull-based accounting keeps managed assets aligned with live balances. Realized profit belongs to active
+    ///      shares only; pending withdrawal liabilities are fixed at request time and do not receive future yield.
     /// @param asset The whitelisted asset being realized as profit.
     /// @param amount The token-native profit amount to pull from the owner.
     function reportYield(address asset, uint256 amount) external onlyOwner {
@@ -420,27 +425,8 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 amountWad = _toWad(received, config.decimals);
         if (amountWad == 0) revert ZeroAmount();
 
-        uint256 activeShareSupply = totalShares;
-        uint256 pendingManagedWad = totalPendingWithdrawWad;
-        uint256 totalExposedWad = activeManagedWad + pendingManagedWad;
-        uint256 activeYieldWad = Math.mulDiv(amountWad, activeManagedWad, totalExposedWad, Math.Rounding.Floor);
-        uint256 pendingYieldWad = amountWad - activeYieldWad;
-
-        uint256 pendingPerfFeeWad;
-        if (pendingYieldWad != 0 && performanceFeeBps != 0 && activeYieldWad != 0) {
-            (, uint256 activeProfitAboveHwmWad) =
-                _profitAboveHighWaterMarkWad(activeManagedWad + activeYieldWad, activeShareSupply, highWaterMarkPPS);
-            if (activeProfitAboveHwmWad != 0) {
-                uint256 pendingProfitAboveHwmWad =
-                    Math.mulDiv(pendingYieldWad, activeProfitAboveHwmWad, activeYieldWad, Math.Rounding.Floor);
-                pendingPerfFeeWad = Math.mulDiv(pendingProfitAboveHwmWad, performanceFeeBps, BPS, Math.Rounding.Floor);
-            }
-        }
-
         totalManagedWad += amountWad;
         config.totalHeld = balanceAfter;
-        _allocatePendingYield(pendingYieldWad - pendingPerfFeeWad);
-        _mintPendingPerformanceFeeShares(pendingPerfFeeWad, activeShareSupply, activeManagedWad + activeYieldWad);
 
         emit YieldReported(asset, received, totalManagedWad);
     }
@@ -465,12 +451,12 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Accrues management fees first, then performance fees against active-PPS gains over the high water mark.
     /// @dev PPS is measured against active managed assets only, excluding timelocked withdrawal liabilities, so deposits,
     ///      cancellations, and claim finalization preserve PPS up to round-down dust instead of appearing as new profit.
-    ///      Pending-side yield and its associated performance fee are handled inside `reportYield`, leaving this path to
-    ///      price only the active-share portion against active managed assets.
+    ///      Pending withdrawals are fixed claims, leaving this path to price only active managed assets.
     function _accrueFees() internal {
         uint256 currentTime = block.timestamp;
         if (totalShares == 0) {
             lastFeeAccrual = currentTime;
+            highWaterMarkPPS = 0;
             return;
         }
 
@@ -525,13 +511,13 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
             effectiveTotalShares += mgmtFeeShares;
         }
 
-        (uint256 currentPPS, uint256 profitWad) =
+        (, uint256 profitWad) =
             _profitAboveHighWaterMarkWad(activeManagedWad, effectiveTotalShares, newHighWaterMarkPPS);
         if (profitWad != 0) {
             uint256 perfFeeWad = Math.mulDiv(profitWad, performanceFeeBps, BPS, Math.Rounding.Floor);
             perfFeeShares = _computeShares(perfFeeWad, effectiveTotalShares, activeManagedWad);
             effectiveTotalShares += perfFeeShares;
-            newHighWaterMarkPPS = currentPPS;
+            newHighWaterMarkPPS = _currentPPS(activeManagedWad, effectiveTotalShares);
         }
     }
 
@@ -552,73 +538,6 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         profitWad = Math.mulDiv(currentPPS - referencePPS, shareSupply, PPS_SCALE, Math.Rounding.Floor);
     }
 
-    /// @notice Allocates the pending share of a reported yield across all live withdrawal requests.
-    /// @param pendingNetYieldWad The WAD yield owed to pending requests after the pending-side perf fee.
-    function _allocatePendingYield(uint256 pendingNetYieldWad) internal {
-        uint256 pendingCount = _pendingUsers.length;
-        if (pendingNetYieldWad == 0 || pendingCount == 0 || totalPendingWithdrawWad == 0) return;
-
-        uint256 pendingBefore = totalPendingWithdrawWad;
-        uint256 remainingYieldWad = pendingNetYieldWad;
-        uint256 remainderRecipientIndex = pendingCount;
-
-        for (uint256 i; i < pendingCount; ++i) {
-            if (pendingWithdraw[_pendingUsers[i]].wadOwed != 0) {
-                remainderRecipientIndex = i;
-            }
-        }
-
-        for (uint256 i; i < pendingCount; ++i) {
-            address user = _pendingUsers[i];
-            WithdrawRequest storage request = pendingWithdraw[user];
-            uint256 userYieldWad = i == remainderRecipientIndex
-                ? remainingYieldWad
-                : Math.mulDiv(pendingNetYieldWad, request.wadOwed, pendingBefore, Math.Rounding.Floor);
-            remainingYieldWad -= userYieldWad;
-            if (userYieldWad == 0) continue;
-
-            AssetConfig storage config = assetConfig[request.asset];
-            uint256 updatedWadOwed = request.wadOwed + userYieldWad;
-            uint256 updatedReservedAmount = _fromWad(updatedWadOwed, config.decimals);
-            uint256 reservedDelta = updatedReservedAmount - request.reservedAmount;
-
-            if (reservedDelta != 0) {
-                uint256 availableLiquidity = _syncTrackedHoldings(request.asset, config);
-                uint256 alreadyReserved = reservedForWithdraw[request.asset];
-                uint256 unreservedLiquidity =
-                    availableLiquidity > alreadyReserved ? availableLiquidity - alreadyReserved : 0;
-                if (reservedDelta > unreservedLiquidity) {
-                    revert InsufficientAssetLiquidity(request.asset, reservedDelta, unreservedLiquidity);
-                }
-
-                reservedForWithdraw[request.asset] = alreadyReserved + reservedDelta;
-            }
-
-            request.wadOwed = updatedWadOwed;
-            request.reservedAmount = updatedReservedAmount;
-        }
-
-        totalPendingWithdrawWad = pendingBefore + pendingNetYieldWad;
-    }
-
-    /// @notice Mints fee-recipient shares against the pending side's realized performance fee.
-    /// @param pendingPerfFeeWad The WAD fee owed by pending withdrawal liabilities.
-    /// @param activeShareSupply The active share supply before minting the pending-side fee shares.
-    /// @param activeManagedWad The active managed assets before adding the pending-side fee itself.
-    function _mintPendingPerformanceFeeShares(
-        uint256 pendingPerfFeeWad,
-        uint256 activeShareSupply,
-        uint256 activeManagedWad
-    ) internal {
-        if (pendingPerfFeeWad == 0) return;
-
-        uint256 pendingPerfFeeShares = _computeShares(pendingPerfFeeWad, activeShareSupply, activeManagedWad);
-        if (pendingPerfFeeShares == 0) return;
-
-        userShares[feeRecipient] += pendingPerfFeeShares;
-        totalShares += pendingPerfFeeShares;
-    }
-
     /// @notice Converts a token-native amount into WAD.
     /// @param amount The token-native amount.
     /// @param decimals The token decimals.
@@ -636,11 +555,19 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     /// @param decimals The token decimals.
     /// @return amount The token-native amount.
     function _fromWad(uint256 wadAmount, uint8 decimals) internal pure returns (uint256 amount) {
+        return _fromWad(wadAmount, decimals, Math.Rounding.Floor);
+    }
+
+    function _fromWad(uint256 wadAmount, uint8 decimals, Math.Rounding rounding)
+        internal
+        pure
+        returns (uint256 amount)
+    {
         if (decimals == 18) return wadAmount;
         if (decimals < 18) {
-            return Math.mulDiv(wadAmount, 1, 10 ** (18 - decimals), Math.Rounding.Floor);
+            return Math.mulDiv(wadAmount, 1, 10 ** (18 - decimals), rounding);
         }
-        return Math.mulDiv(wadAmount, 10 ** (decimals - 18), 1, Math.Rounding.Floor);
+        return Math.mulDiv(wadAmount, 10 ** (decimals - 18), 1, rounding);
     }
 
     /// @notice Computes shares for a WAD deposit amount under the virtual-offset share model.
@@ -698,6 +625,21 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     function _requireWhitelistedAsset(address asset) internal view returns (AssetConfig storage config) {
         config = assetConfig[asset];
         if (!config.enabled) revert AssetNotWhitelisted(asset);
+    }
+
+    function _setOrCheckShareAsset(address user, address asset) internal {
+        address existingAsset = shareAssetOf[user];
+        if (existingAsset == address(0)) {
+            shareAssetOf[user] = asset;
+            return;
+        }
+        if (existingAsset != asset) revert ShareAssetMismatch(user, existingAsset, asset);
+    }
+
+    function _requireShareAsset(address user, address asset) internal view {
+        address expectedAsset = shareAssetOf[user];
+        if (expectedAsset == address(0) || user == feeRecipient) return;
+        if (expectedAsset != asset) revert ShareAssetMismatch(user, expectedAsset, asset);
     }
 
     /// @notice Removes an asset from `assetList` in O(1) time via swap-and-pop.
