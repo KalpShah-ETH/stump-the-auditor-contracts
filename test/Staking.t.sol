@@ -524,6 +524,49 @@ contract StakingTest is BaseTest {
         assertApproxEqAbs(staking.earned(alice, address(stakingToken)), 10 ether, DUST_TOLERANCE);
     }
 
+    function testRewardAccumulatorCarriesRemainderThroughMinStakeSpam() public {
+        uint128 incumbentStake = 10 ether;
+        uint256 streamAmount = 2_159_460;
+        uint256 spamBlocks = 25;
+        uint128 minStake = uint128(staking.MIN_STAKE_AMOUNT());
+        address[] memory attackers = new address[](spamBlocks);
+
+        _stake(alice, incumbentStake, tier30);
+        _notify(address(stakingToken), streamAmount);
+
+        for (uint256 i; i < spamBlocks; ++i) {
+            advanceBlocks(1);
+
+            address attacker = _roundingAttacker(i);
+            attackers[i] = attacker;
+            mintAndApprove(stakingToken, attacker, address(staking), minStake);
+
+            vm.prank(attacker);
+            staking.stake(minStake, tier30);
+        }
+
+        warp(REWARD_DURATION - (spamBlocks * SECONDS_PER_BLOCK));
+
+        uint256 totalEarned = staking.earned(alice, address(stakingToken));
+        for (uint256 i; i < spamBlocks; ++i) {
+            totalEarned += staking.earned(attackers[i], address(stakingToken));
+        }
+
+        assertApproxEqAbs(totalEarned, streamAmount, 10);
+    }
+
+    function testRewardAccumulatorDistributesLowRateStreamWithoutSpam() public {
+        uint128 incumbentStake = 10 ether;
+        uint256 streamAmount = 2_159_460;
+
+        _stake(alice, incumbentStake, tier30);
+        _notify(address(stakingToken), streamAmount);
+
+        warp(REWARD_DURATION);
+
+        assertApproxEqAbs(staking.earned(alice, address(stakingToken)), streamAmount, 1);
+    }
+
     function testExpiredStakeKeepsBoostUntilWithdrawn() public {
         _stake(alice, DEFAULT_STAKE, tier60);
 
@@ -1367,6 +1410,10 @@ contract StakingTest is BaseTest {
     function _notify(address token, uint256 amount) internal {
         vm.prank(owner);
         staking.notifyRewardAmount(token, amount);
+    }
+
+    function _roundingAttacker(uint256 index) internal pure returns (address) {
+        return address(uint160(uint256(keccak256(abi.encodePacked("round7-rounding-attacker", index)))));
     }
 
     function _claimGas(Staking staking_, address user, address rewardToken) internal returns (uint256 gasUsed) {

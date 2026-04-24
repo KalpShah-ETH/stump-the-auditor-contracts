@@ -83,6 +83,7 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     mapping(address => RewardData) public rewardData;
+    mapping(address => uint256) public residualNumerator;
     address[] public rewardTokensList;
 
     mapping(address => mapping(address => uint256)) public userRewardPerTokenPaid;
@@ -477,7 +478,6 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
 
     function _updateRewardGlobal(address token) internal {
         RewardData storage reward = rewardData[token];
-        reward.rewardPerTokenStored = rewardPerTokenFor(token);
         if (totalBoostedSupply == 0 && reward.lastUpdateTime < reward.periodFinish) {
             uint64 currentTime = _currentTime();
             if (currentTime > reward.lastUpdateTime) {
@@ -489,7 +489,14 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
                 reward.lastUpdateTime = currentTime;
             }
         } else {
-            reward.lastUpdateTime = _lastTimeRewardApplicable(reward);
+            uint64 timeApplicable = _lastTimeRewardApplicable(reward);
+            if (timeApplicable > reward.lastUpdateTime) {
+                uint256 numerator =
+                    ((timeApplicable - reward.lastUpdateTime) * uint256(reward.rewardRate)) + residualNumerator[token];
+                reward.rewardPerTokenStored += numerator / totalBoostedSupply;
+                residualNumerator[token] = numerator % totalBoostedSupply;
+            }
+            reward.lastUpdateTime = timeApplicable;
         }
     }
 
@@ -516,7 +523,8 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         if (timeApplicable <= reward.lastUpdateTime) return rewardPerTokenStored_;
 
         uint256 elapsed = timeApplicable - reward.lastUpdateTime;
-        return rewardPerTokenStored_ + Math.mulDiv(elapsed, reward.rewardRate, totalBoostedSupply);
+        uint256 numerator = (elapsed * uint256(reward.rewardRate)) + residualNumerator[token];
+        return rewardPerTokenStored_ + (numerator / totalBoostedSupply);
     }
 
     function earnedUser(address user, address token) internal view returns (uint256) {
