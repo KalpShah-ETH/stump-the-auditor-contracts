@@ -664,6 +664,49 @@ contract VaultTest is BaseTest {
         fresh.deposit(address(dai), 1 ether, alice);
     }
 
+    function testThirdPartyDepositCannotBindFeeRecipientFirstShareAsset() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        vm.expectRevert(abi.encodeWithSelector(IVault.UnauthorizedReceiverBinding.selector, feeRecipient));
+        vm.prank(alice);
+        fresh.deposit(address(usdc), 1e6, feeRecipient);
+
+        assertEq(fresh.shareAssetOf(feeRecipient), address(0));
+    }
+
+    function testFeeRecipientCanBindOwnFirstShareAsset() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+        mintAndApprove(dai, feeRecipient, address(fresh), 100 ether);
+
+        vm.prank(feeRecipient);
+        uint256 minted = fresh.deposit(address(dai), 100 ether, feeRecipient);
+
+        assertGt(minted, 0);
+        assertEq(fresh.shareAssetOf(feeRecipient), address(dai));
+    }
+
+    function testThirdPartyDepositCannotBindUserFirstShareAsset() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        vm.expectRevert(abi.encodeWithSelector(IVault.UnauthorizedReceiverBinding.selector, bob));
+        vm.prank(alice);
+        fresh.deposit(address(usdc), 1e6, bob);
+
+        assertEq(fresh.shareAssetOf(bob), address(0));
+    }
+
+    function testThirdPartyDepositToExistingSameAssetBindingWorks() public {
+        Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
+
+        _depositUsdc(fresh, bob, 100e6);
+
+        vm.prank(alice);
+        uint256 minted = fresh.deposit(address(usdc), 1e6, bob);
+
+        assertGt(minted, 0);
+        assertEq(fresh.shareAssetOf(bob), address(usdc));
+    }
+
     function testFeeOnTransferDepositRevertsUnsupportedToken() public {
         Vault fresh = _deployDefaultVault(0, 0, DEFAULT_TIMELOCK);
         FeeOnTransferVaultToken feeToken;

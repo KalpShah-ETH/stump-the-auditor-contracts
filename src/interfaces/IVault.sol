@@ -44,6 +44,7 @@ interface IVault {
     error InsufficientAssetLiquidity(address asset, uint256 needed, uint256 available);
     error ShareAssetMismatch(address user, address expected, address actual);
     error FeeRecipientAssetMismatch(address expected, address actual);
+    error UnauthorizedReceiverBinding(address receiver);
     error AssetHasOutstandingShares(address asset, uint256 shares);
 
     function deposit(address asset, uint256 amount, address receiver) external returns (uint256 sharesMinted);

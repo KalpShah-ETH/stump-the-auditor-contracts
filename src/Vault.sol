@@ -118,6 +118,9 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     {
         if (amount == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver != msg.sender && shareAssetOf[receiver] == address(0)) {
+            revert UnauthorizedReceiverBinding(receiver);
+        }
 
         AssetConfig storage config = _requireWhitelistedAsset(asset);
         _accrueFees(asset);
