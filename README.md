@@ -76,26 +76,35 @@ Good stumps live where **two features interact**:
 
 Single-line rounding flips often beat multi-line reworks. Diff size isn't judged — severity, subtlety, realism, and novelty are.
 
-## Workflow
+## Two Paths to Win
 
-Step by step:
+### Path A — Plant a vulnerability and slip it past Lite
 
-1. **Apply.** Submit the application form. Decisions roll out within 48 hours.
+1. **Apply.** Submit the application form. Decisions within 48 hours.
 2. **Get whitelisted on AI Auditor.** Approved applicants are whitelisted on https://aiauditor.certik.com. Sign up (Google or magic link) — your account comes pre-loaded with **4 Lite scan credits**.
-3. **Read the contracts.** Fork or clone this repo. Pick one of `Vault`, `Staking`, or `Lending`. Study the per-contract README and the source.
+3. **Read the contracts.** Fork this repo. Pick one of `Vault`, `Staking`, or `Lending`. Study the per-contract README and the source.
 4. **Plant a vulnerability.** Modify the contract you picked, ≤50 lines. The bug must be:
    - Critical or High severity (real fund-drain — see severity bar above)
    - Subtle enough to slip past AI Auditor Lite
    - Realistic enough that a senior engineer could plausibly ship it as a mistake
 5. **Scan with Lite mode only.** Run AI Auditor against your modified contract.
-   - **⚠️ Lite mode only. Do NOT use Max mode.** Max is disabled for the challenge anyway, but in case of confusion: Max will eat your credits and any Max-mode scan is invalid for submission.
+   - **⚠️ Lite mode only. Do NOT use Max mode.** Max is disabled for the challenge — any Max-mode scan is invalid, and Max would burn through your credits faster.
    - Each scan costs one credit. You get 4 total, flexible across the three contracts.
 6. **Iterate.** If Lite flags your bug, the scan is consumed and you have 3 left. Tweak and rescan. If Lite misses your bug, you've stumped it.
-7. **Submit.** One valid stump = one Lite-mode scan that missed a real Critical/High vulnerability you planted. Submit via the form linked in your approval email. You may submit up to 3 stumps total — one per contract.
+7. **Submit.** One valid stump = one Lite-mode scan that missed a real Critical/High vulnerability you planted. Submit via the form linked in your approval email.
 
-### Bonus: the base contracts may or may not have undiscovered vulnerabilities of their own
+### Path B — Find a real vulnerability already in the base contracts
 
-These base contracts have been reviewed across multiple rounds, and we believe they're secure. We could be wrong. If, while studying them, you find a real Critical or High vulnerability in the **unmodified** base, that counts too — email us with a working PoC and we'll factor it into your submission. (We'll also patch it, announce publicly, and reset affected scan counts.)
+The base contracts may contain real, intentional vulnerabilities. Finding one is the other way to win. Same severity bar, same prizes, same judging.
+
+1. **Apply** (same as Path A).
+2. **Read the unmodified contracts** in this repo carefully.
+3. **Find a real bug.** It has to be Critical or High — same definitions. Write a Foundry PoC that proves the exploit against the unmodified base.
+4. **Submit** via the same form. Pick the contract, link your PoC repo, write up the bug. No scan URL needed for Path B (you didn't plant anything; nothing to scan against).
+
+Path B is not easier than Path A. The contracts have been written carefully and the bugs (if any exist) are not labeled. Looking only at the diff between the base and your fork tells you nothing on Path B — there is no diff.
+
+You can submit on either path. **Up to 3 submissions per person total**, across both paths combined, max one per contract.
 
 ## Getting Started
 
@@ -121,19 +130,20 @@ forge test --fuzz-runs 1000
 - Solidity `^0.8.24`, EVM version `cancun`
 - OpenZeppelin Contracts v5.1 (pinned submodule)
 
-If `forge build` fails on a fresh clone of the unmodified base, that's our bug — email us and we'll patch + reset your scan count on the affected contract.
+If `forge build` fails on a fresh clone of the unmodified base, email us and we'll patch.
 
 ## Submission Contents (Recap)
 
 Submit via the form linked in your approval email. Provide:
 
 - Which contract you targeted (Vault / Staking / Lending)
-- AI Auditor Lite scan URL (proof Lite missed your bug)
-- Link to your fork / GitHub repo containing the modified contract (we read your code from there — no .sol upload needed)
+- Path: A (planted) or B (existing in base)
+- AI Auditor Lite scan URL — **Path A only** (proof Lite missed your planted bug)
+- GitHub repo URL — your fork (Path A: contains your ≤50-line modification; Path B: contains your Foundry PoC against the unmodified base)
 - Severity claim (Critical or High) with subclass + 1-paragraph justification
 - Writeup: what the bug is, exploit steps, impact, why it's a realistic dev mistake
 
-One valid stump per scan. Up to 3 submissions per person, one per contract.
+Up to 3 submissions per person, max one per contract, across both paths combined.
 
 ## Contact
 
