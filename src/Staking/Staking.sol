@@ -8,7 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IStaking} from "./interfaces/IStaking.sol";
+import {IStaking} from "../interfaces/IStaking.sol";
 
 /// @title Lock-tiered multi-reward staking with penalty redistribution
 ///

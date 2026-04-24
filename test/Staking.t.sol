@@ -8,7 +8,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IStaking} from "src/interfaces/IStaking.sol";
-import {Staking} from "src/Staking.sol";
+import {Staking} from "src/Staking/Staking.sol";
 import {MockERC20} from "src/mocks/MockERC20.sol";
 import {BaseTest} from "test/helpers/BaseTest.sol";
 

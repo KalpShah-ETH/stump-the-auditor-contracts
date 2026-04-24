@@ -9,7 +9,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {ILendingPool} from "src/interfaces/ILendingPool.sol";
 import {IPriceOracle} from "src/interfaces/IPriceOracle.sol";
-import {Lending} from "src/Lending.sol";
+import {Lending} from "src/Lending/Lending.sol";
 import {PriceOracle} from "src/PriceOracle.sol";
 import {MockERC20} from "src/mocks/MockERC20.sol";
 import {BaseTest} from "test/helpers/BaseTest.sol";

@@ -9,7 +9,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IVault} from "./interfaces/IVault.sol";
+import {IVault} from "../interfaces/IVault.sol";
 
 /// @title Multi-asset vault with fee accrual and withdrawal timelocks
 ///

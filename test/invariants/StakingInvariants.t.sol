@@ -6,7 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IStaking} from "src/interfaces/IStaking.sol";
-import {Staking} from "src/Staking.sol";
+import {Staking} from "src/Staking/Staking.sol";
 import {MockERC20} from "src/mocks/MockERC20.sol";
 import {BaseTest} from "test/helpers/BaseTest.sol";
 

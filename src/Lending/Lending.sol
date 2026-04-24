@@ -11,9 +11,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import {ILendingPool} from "./interfaces/ILendingPool.sol";
-import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
-import {LendingMath} from "./libs/LendingMath.sol";
+import {ILendingPool} from "../interfaces/ILendingPool.sol";
+import {IPriceOracle} from "../interfaces/IPriceOracle.sol";
+import {LendingMath} from "./LendingMath.sol";
 
 /// @title Lending — multi-asset lending pool with scaled-balance accounting and liquidation
 ///

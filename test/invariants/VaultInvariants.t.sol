@@ -7,7 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IVault} from "src/interfaces/IVault.sol";
-import {Vault} from "src/Vault.sol";
+import {Vault} from "src/Vault/Vault.sol";
 import {MockERC20} from "src/mocks/MockERC20.sol";
 import {BaseTest} from "test/helpers/BaseTest.sol";
 

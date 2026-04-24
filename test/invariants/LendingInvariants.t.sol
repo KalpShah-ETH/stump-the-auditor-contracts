@@ -7,9 +7,9 @@ import {Test} from "forge-std/Test.sol";
 
 import {ILendingPool} from "src/interfaces/ILendingPool.sol";
 import {IPriceOracle} from "src/interfaces/IPriceOracle.sol";
-import {Lending} from "src/Lending.sol";
+import {Lending} from "src/Lending/Lending.sol";
 import {PriceOracle} from "src/PriceOracle.sol";
-import {LendingMath} from "src/libs/LendingMath.sol";
+import {LendingMath} from "src/Lending/LendingMath.sol";
 import {MockERC20} from "src/mocks/MockERC20.sol";
 import {BaseTest} from "test/helpers/BaseTest.sol";
 
