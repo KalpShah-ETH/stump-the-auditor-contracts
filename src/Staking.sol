@@ -59,6 +59,8 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
     uint256 public constant MAX_STAKES_PER_USER = 64;
     uint256 public constant MIN_STAKE_AMOUNT = 1e12;
     uint256 public constant MIN_FLUSH_PENALTY_AMOUNT = 1e15;
+    uint256 public constant EXTRA_PRECISION = 1e18;
+    uint256 public constant ACCUMULATOR_PRECISION = PRECISION * EXTRA_PRECISION;
 
     IERC20 public immutable stakingToken;
 
@@ -83,7 +85,6 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     mapping(address => RewardData) public rewardData;
-    mapping(address => uint256) public residualNumerator;
     address[] public rewardTokensList;
 
     mapping(address => mapping(address => uint256)) public userRewardPerTokenPaid;
@@ -288,10 +289,16 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
 
     /// @notice Returns the current reward-per-boosted-token accumulator for a reward token.
     /// @param rewardToken The reward token to inspect.
-    /// @return accumulator The current reward-per-token value, scaled by `PRECISION`.
+    /// @return accumulator The current reward-per-token value, scaled by `ACCUMULATOR_PRECISION`.
     function rewardPerToken(address rewardToken) external view returns (uint256 accumulator) {
         _requireRewardTokenListed(rewardToken);
         return rewardPerTokenFor(rewardToken);
+    }
+
+    /// @notice Compatibility shim for the removed remainder-carry state.
+    /// @return residual Always zero because accumulator precision absorbs sub-wei dust.
+    function residualNumerator(address) external pure returns (uint256 residual) {
+        return 0;
     }
 
     /// @notice Returns the caller's current earned amount for a reward token.
@@ -491,10 +498,11 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         } else {
             uint64 timeApplicable = _lastTimeRewardApplicable(reward);
             if (timeApplicable > reward.lastUpdateTime) {
-                uint256 numerator =
-                    ((timeApplicable - reward.lastUpdateTime) * uint256(reward.rewardRate)) + residualNumerator[token];
-                reward.rewardPerTokenStored += numerator / totalBoostedSupply;
-                residualNumerator[token] = numerator % totalBoostedSupply;
+                reward.rewardPerTokenStored += Math.mulDiv(
+                    timeApplicable - reward.lastUpdateTime,
+                    uint256(reward.rewardRate) * EXTRA_PRECISION,
+                    totalBoostedSupply
+                );
             }
             reward.lastUpdateTime = timeApplicable;
         }
@@ -523,13 +531,16 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
         if (timeApplicable <= reward.lastUpdateTime) return rewardPerTokenStored_;
 
         uint256 elapsed = timeApplicable - reward.lastUpdateTime;
-        uint256 numerator = (elapsed * uint256(reward.rewardRate)) + residualNumerator[token];
-        return rewardPerTokenStored_ + (numerator / totalBoostedSupply);
+        return
+            rewardPerTokenStored_
+                + Math.mulDiv(elapsed, uint256(reward.rewardRate) * EXTRA_PRECISION, totalBoostedSupply);
     }
 
     function earnedUser(address user, address token) internal view returns (uint256) {
         return Math.mulDiv(
-            _userBoostedAmount[user], rewardPerTokenFor(token) - userRewardPerTokenPaid[user][token], PRECISION
+            _userBoostedAmount[user],
+            rewardPerTokenFor(token) - userRewardPerTokenPaid[user][token],
+            ACCUMULATOR_PRECISION
         ) + rewards[user][token];
     }
 
@@ -571,7 +582,7 @@ contract Staking is IStaking, Ownable2Step, ReentrancyGuard, Pausable {
             return;
         }
 
-        reward.rewardPerTokenStored += Math.mulDiv(penalty, PRECISION, eligibleBoostedSupply);
+        reward.rewardPerTokenStored += Math.mulDiv(penalty, ACCUMULATOR_PRECISION, eligibleBoostedSupply);
         userRewardPerTokenPaid[penalizedUser][primaryRewardToken] = reward.rewardPerTokenStored;
 
         emit PenaltyFlushed(primaryRewardToken, penalty, reward.periodFinish);

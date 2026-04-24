@@ -567,6 +567,38 @@ contract StakingTest is BaseTest {
         assertApproxEqAbs(staking.earned(alice, address(stakingToken)), streamAmount, 1);
     }
 
+    function testRewardAccumulatorDoesNotLeakPriorCohortResidualToDustStaker() public {
+        uint128 incumbentStake = type(uint128).max;
+        uint128 dustStake = uint128(staking.MIN_STAKE_AMOUNT());
+        uint256 streamAmount = 1_000 ether;
+
+        mintAndApprove(stakingToken, alice, address(staking), incumbentStake);
+
+        _stake(alice, incumbentStake, tier30);
+
+        vm.prank(owner);
+        staking.setRewardsDuration(address(stakingToken), 365 days);
+        _notify(address(stakingToken), streamAmount);
+
+        warp(30 days);
+
+        _stake(bob, dustStake, tier30);
+
+        vm.prank(alice);
+        staking.unstake(0);
+
+        warp(1);
+
+        uint256 bobBalanceBefore = stakingToken.balanceOf(bob);
+
+        vm.prank(bob);
+        staking.claim(address(stakingToken));
+
+        uint256 bobClaimed = stakingToken.balanceOf(bob) - bobBalanceBefore;
+        uint256 maxLegitimateOneSecondReward = (streamAmount / 365 days) + DUST_TOLERANCE;
+        assertLe(bobClaimed, maxLegitimateOneSecondReward);
+    }
+
     function testExpiredStakeKeepsBoostUntilWithdrawn() public {
         _stake(alice, DEFAULT_STAKE, tier60);
 
