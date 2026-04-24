@@ -149,7 +149,7 @@ Single-line rounding flips often beat multi-line reworks. Diff size is not judge
 ## Quickstart
 
 ```bash
-git clone --recurse-submodules https://github.com/DicksonWu654/stump-the-auditor-contracts
+git clone --recurse-submodules https://github.com/CertiKProject/stump-the-auditor-contracts
 cd stump-the-auditor-contracts
 
 forge build
