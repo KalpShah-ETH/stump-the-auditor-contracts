@@ -4,7 +4,7 @@ CertiK is running a public 2-week challenge. The goal: see if you can sneak a re
 
 ## Challenge Window
 
-**2026-04-28, 9:00 AM ET to 2026-05-12, 23:59 ET.** Rolling submissions. Deadline is firm.
+**2026-04-29, 9:00 AM ET to 2026-05-13, 23:59 ET.** Rolling submissions. Deadline is firm.
 
 - Apply: https://docs.google.com/forms/d/1dPBQaHMjTGleUUfIo0CJtqygHTSuFULY_l-pQX6kQ-4
 - Submit: https://docs.google.com/forms/d/1p7BsPZZkrYneSITfsY2hrOq81ohX-f-DTgoUGYTLap0
