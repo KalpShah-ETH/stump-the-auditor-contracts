@@ -260,6 +260,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
             : _computeShares(request.wadOwed, totalShares, activeManagedWad);
         if (newShares == 0 && request.wadOwed != 0) revert ZeroAmount();
 
+        totalManagedWad += request.wadOwed;
         totalPendingWithdrawWad -= request.wadOwed;
         reservedForWithdraw[request.asset] -= request.reservedAmount;
         _userShares[msg.sender] += newShares;
