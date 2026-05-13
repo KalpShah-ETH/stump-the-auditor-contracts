@@ -596,18 +596,21 @@ contract Lending is ILendingPool, Ownable2Step, ReentrancyGuard, Pausable {
             liquidationCapacityWad += Math.mulDiv(valueWad, reserve.liquidationThresholdBps, BPS);
         }
 
-        address[] storage borrowAssets = userBorrowAssets[user];
-        for (uint256 i; i < borrowAssets.length; ++i) {
-            address asset = borrowAssets[i];
-            uint256 scaledDebt = userScaledBorrow[user][asset];
-            if (scaledDebt == 0) continue;
+address[] storage borrowAssets = userBorrowAssets[user];
+for (uint256 i; i < borrowAssets.length; ++i) {
+    address asset = borrowAssets[i];
+    uint256 scaledDebt = userScaledBorrow[user][asset];
+    if (scaledDebt == 0) continue;
 
-            Reserve memory reserve = _getUpdatedReserve(asset);
-            uint256 borrowBalance = LendingMath.scaledToUnderlying(scaledDebt, reserve.borrowIndex, Math.Rounding.Ceil);
-            if (borrowBalance == 0) continue;
+    // Indices were already updated by _accrueInterest at the call site;
+    // reading stored state avoids a redundant simulation and keeps the
+    // collateral and debt loops consistent in their reserve source.
+    Reserve memory reserve = _getStoredReserve(asset);
+    uint256 borrowBalance = LendingMath.scaledToUnderlying(scaledDebt, reserve.borrowIndex, Math.Rounding.Ceil);
+    if (borrowBalance == 0) continue;
 
-            totalDebtValueWad += _getAssetValueWad(asset, borrowBalance);
-        }
+    totalDebtValueWad += _getAssetValueWad(asset, borrowBalance);
+}
 
         availableBorrowsWad = collateralCapacityWad > totalDebtValueWad ? collateralCapacityWad - totalDebtValueWad : 0;
         healthFactor =
